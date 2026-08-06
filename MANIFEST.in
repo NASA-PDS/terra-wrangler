@@ -1,0 +1,6 @@
+graft src
+include src/pds/tf_sheriff/VERSION.txt
+global-exclude *.py[cod]
+
+include TERRAFORM_GUIDELINES.md
+include .tfvalidate-ignore.example
