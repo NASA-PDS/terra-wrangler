@@ -1,0 +1,17 @@
+# .tfvalidate-ignore — tracked exceptions for validate_terraform.py
+#
+# One check ID per line. Optionally scope to a path by adding a substring
+# after the ID — the ignore only applies to modules whose path contains it.
+# Unscoped lines ignore that check everywhere in the repo.
+#
+# Keep this file reviewed like any other config: an ignore that's no longer
+# justified should be deleted, not left to rot.
+#
+# Examples:
+#
+# M6                          ignore the state-bucket-naming check everywhere
+#                              (e.g. repo predates the pds-<venue>-infra convention
+#                              and a rename is tracked separately in JIRA-1234)
+#
+# M15  opensearch_managed      ignore the default_tags check only for modules
+#                              whose path contains "opensearch_managed"
