@@ -8,7 +8,7 @@ The org-wide source of truth for how PDS/PDC repositories write Terraform, plus 
 
 ## Prerequisites
 
-**Python 3.9+.** No third-party dependencies at runtime — only the `dev` extras (linting, tests) require anything beyond the standard library.
+**Python 3.13**, per the current org standard. No third-party dependencies at runtime — only the `dev` extras (linting, tests) require anything beyond the standard library.
 
 
 ## User Quickstart
