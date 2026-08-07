@@ -88,6 +88,8 @@ def _write_compliant_module(root: Path) -> None:
     (root / "backend-dev.hcl").write_text(COMPLIANT_BACKEND_DEV_HCL)
     (root / "README.md").write_text("# example\n")
     (root / ".terraform.lock.hcl").write_text("# lock file stub\n")
+    (root / "tfvars").mkdir(exist_ok=True)
+    (root / "tfvars" / "dev.tfvars.example").write_text('venue      = "dev"\ncomponent_name = "example"\n')
     (root.parent / ".gitignore").write_text("*.tfstate\n.terraform/\n*.tfvars\n")
 
 
@@ -191,6 +193,21 @@ class ValidateTerraformTests(unittest.TestCase):
 
             failed_ids = {c[0] for c in report.findings("error", "fail")}
             self.assertNotIn("P19", failed_ids)
+
+    def test_missing_tfvars_example_is_a_must_have_failure(self):
+        """A backend-<venue>.hcl with no matching tfvars/<venue>.tfvars.example should fail P23."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tf_root = Path(tmp) / "terraform"
+            _write_compliant_module(tf_root)
+            (tf_root / "tfvars" / "dev.tfvars.example").unlink()
+
+            ignores = validator.load_ignores(tf_root)
+            report = validator.check_module(tf_root, tf_root, ignores)
+
+            failed_ids = {c[0] for c in report.findings("error", "fail")}
+            self.assertIn("P23", failed_ids)
 
     def test_tfvalidate_ignore_downgrades_a_failure_to_skip(self):
         """A check listed in .tfvalidate-ignore should be reported as skipped, not failed."""

@@ -75,6 +75,7 @@ Check IDs use three prefixes reflecting the origin of each requirement:
 | P20 | All S3 buckets created via `pds-tf-modules//terraform/modules/s3/bucket` — never `resource "aws_s3_bucket"` directly | Enforces org cybersecurity baseline: AES-256 at rest, public-access blocks, SSL-only policy, `BucketOwnerEnforced` controls |
 | P21 | All EC2 instances created via `pds-tf-modules//terraform/modules/ec2` — never `resource "aws_instance"` or `resource "aws_launch_template"` directly | Enforces org cybersecurity baseline: encrypted EBS root, MCP-approved AMI, MCP SSM/CloudWatch profile, no public IP |
 | P22 | Cognito user pool users, groups, and group memberships are NOT managed in Terraform | Multiple modules contribute to one shared user pool — Terraform would cause modules to overwrite each other's contributions (see [Cognito user pool management](#cognito-user-pool-management)) |
+| P23 | For every `backend-<venue>.hcl`, commit a matching `tfvars/<venue>.tfvars.example` to the public repo showing required variable names with placeholder values | Engineers cloning the repo know exactly which variables to supply; real values with secrets stay in the private `<repo>-deploy` repo or local gitignored `.tfvars` files |
 
 ---
 
@@ -107,7 +108,7 @@ Check IDs use three prefixes reflecting the origin of each requirement:
 
 ## Code examples
 
-### Root module layout (T2, A5, P6)
+### Root module layout (T2, A5, P6, P23)
 
 ```
 terraform/
@@ -117,17 +118,39 @@ terraform/
 ├── versions.tf          # required_version + required_providers
 ├── providers.tf         # provider "aws" block (root modules only)
 ├── backend.tf           # empty backend "s3" {} block
-├── backend-dev.hcl      # per-venue backend config (committed — see P6 below)
+├── backend-dev.hcl      # bucket/key/region — committed; never contains credentials (P6)
 ├── backend-test.hcl
 ├── backend-prod.hcl
 ├── README.md
 ├── tfvars/
-│   ├── dev.tfvars.example
+│   ├── dev.tfvars.example   # committed — variable names + placeholder values (P23)
 │   ├── test.tfvars.example
 │   └── prod.tfvars.example
 └── modules/             # local nested modules, kept flat (T4)
     └── <name>/
 ```
+
+**What lives where:**
+
+| File | Committed to public repo? | Where real values go |
+|---|---|---|
+| `backend-<venue>.hcl` | Yes — bucket name and state key are not credentials | n/a; nothing sensitive |
+| `tfvars/<venue>.tfvars.example` | Yes — shows variable names with placeholder values | n/a; no real values |
+| `tfvars/<venue>.tfvars` | No — gitignored (T8) | `<repo>-deploy` private repo |
+
+### Variables files (P23)
+
+Commit `.example` files that document every required variable. Engineers copy the file, fill in real values, and keep the copy in the private `<repo>-deploy` repo (or gitignore it locally).
+
+```hcl
+# tfvars/dev.tfvars.example — copy to dev.tfvars in <repo>-deploy and fill in real values
+tenant         = "en"
+venue          = "dev"
+component_name = "registry"
+managed_by     = "<your-email@jpl.nasa.gov>"
+```
+
+The `.example` file must list every variable that has no default (or whose default is intentionally wrong for the env). It must never contain real ARNs, account IDs, or secrets — those belong in the gitignored `.tfvars`.
 
 ### Backend (A5, A7, P6)
 
@@ -548,7 +571,7 @@ The validator alone is not enough. Use all four layers:
 1. **`scripts/validate_terraform.py`** — static checks for the mechanically verifiable Must-Haves:
    - T-series: T2, T3, T8 (repo-level), T9, T10, T11, T14 (partial), T16
    - A-series: A5, A7, A12
-   - P-series: P6, P15, P19, P20, P21
+   - P-series: P6, P15, P19, P20, P21, P23
    - Should-Haves: S1–S3, S5
 
    Must-Have failures exit non-zero; Should-Have warnings don't (unless `--strict`). Run it in CI, pre-commit, and locally.

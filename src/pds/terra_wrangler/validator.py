@@ -316,6 +316,14 @@ def check_module(module_dir: Path, root: Path, ignores) -> Report:
             "error", len(direct_ec2) == 0,
             detail=f"found: {[f'{t}.{n}' for t, n in direct_ec2[:5]]}" if direct_ec2 else "")
 
+    # P23 — tfvars/<venue>.tfvars.example committed for each venue that has a backend-<venue>.hcl (error)
+    if not reusable:
+        for hf in module_dir.glob("backend-*.hcl"):
+            venue = hf.name.removeprefix("backend-").removesuffix(".hcl")
+            example = module_dir / "tfvars" / f"{venue}.tfvars.example"
+            add("P23", f"tfvars/{venue}.tfvars.example committed alongside backend-{venue}.hcl", "error",
+                example.exists())
+
     # ── S-series: Should-Have recommendations ────────────────────────────────
 
     # S5 — examples/ dir for reusable modules (warning)
