@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tf-sheriff — PDS/PDC Terraform Development Guidelines validator."""
+"""terra-wrangler — PDS/PDC Terraform Development Guidelines validator."""
 import importlib.resources
 
 

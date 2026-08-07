@@ -1,11 +1,11 @@
 # encoding: utf-8
-"""Tests for pds.tf_sheriff.validator."""
+"""Tests for pds.terra_wrangler.validator."""
 import filecmp
 import textwrap
 import unittest
 from pathlib import Path
 
-from pds.tf_sheriff import validator
+from pds.terra_wrangler import validator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -120,6 +120,40 @@ class ValidateTerraformTests(unittest.TestCase):
             failed_ids = {c[0] for c in report.findings("error", "fail")}
             self.assertIn("M5", failed_ids)
 
+    def test_iam_resource_outside_iam_module_is_a_must_have_failure(self):
+        """An aws_iam_* resource declared in a non-iam root module should fail M19."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tf_root = Path(tmp) / "terraform"
+            _write_compliant_module(tf_root)
+            (tf_root / "main.tf").write_text(
+                COMPLIANT_MAIN_TF + '\nresource "aws_iam_role" "bad" {\n  name = "bad"\n}\n'
+            )
+
+            ignores = validator.load_ignores(tf_root)
+            report = validator.check_module(tf_root, tf_root, ignores)
+
+            failed_ids = {c[0] for c in report.findings("error", "fail")}
+            self.assertIn("M19", failed_ids)
+
+    def test_iam_resources_isolated_in_standalone_iam_module_pass(self):
+        """An aws_iam_* resource declared inside a standalone iam/ root module should not fail M19."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tf_root = Path(tmp) / "terraform"
+            iam_root = tf_root / "iam"
+            iam_root.mkdir(parents=True)
+            (iam_root / "main.tf").write_text('resource "aws_iam_role" "app" {\n  name = "app"\n}\n')
+            (iam_root / "backend.tf").write_text(COMPLIANT_BACKEND_TF)
+
+            ignores = validator.load_ignores(iam_root)
+            report = validator.check_module(iam_root, tf_root, ignores)
+
+            failed_ids = {c[0] for c in report.findings("error", "fail")}
+            self.assertNotIn("M19", failed_ids)
+
     def test_tfvalidate_ignore_downgrades_a_failure_to_skip(self):
         """A check listed in .tfvalidate-ignore should be reported as skipped, not failed."""
         import tempfile
@@ -140,22 +174,22 @@ class ValidateTerraformTests(unittest.TestCase):
 class StandaloneScriptSyncTests(unittest.TestCase):
     """Guards against the two distribution copies of the validator drifting apart.
 
-    tf-sheriff ships the validator two ways: as an installable package
-    (``pds.tf_sheriff.validator``) and as a single dependency-free file
+    terra-wrangler ships the validator two ways: as an installable package
+    (``pds.terra_wrangler.validator``) and as a single dependency-free file
     (``scripts/validate_terraform.py``) meant to be vendored into another
     repo's CI without a package install. Both must contain the same logic.
     """
 
     def test_standalone_script_matches_package_module(self):
-        """scripts/validate_terraform.py must be identical to src/pds/tf_sheriff/validator.py."""
+        """scripts/validate_terraform.py must be identical to src/pds/terra_wrangler/validator.py."""
         standalone = REPO_ROOT / "scripts" / "validate_terraform.py"
-        packaged = REPO_ROOT / "src" / "pds" / "tf_sheriff" / "validator.py"
+        packaged = REPO_ROOT / "src" / "pds" / "terra_wrangler" / "validator.py"
 
         self.assertTrue(standalone.exists(), f"missing {standalone}")
         self.assertTrue(packaged.exists(), f"missing {packaged}")
         self.assertTrue(
             filecmp.cmp(standalone, packaged, shallow=False),
-            "scripts/validate_terraform.py and src/pds/tf_sheriff/validator.py have drifted apart — "
+            "scripts/validate_terraform.py and src/pds/terra_wrangler/validator.py have drifted apart — "
             "keep them byte-for-byte identical (copy one over the other) or update this test if a "
             "deliberate divergence is introduced.",
         )

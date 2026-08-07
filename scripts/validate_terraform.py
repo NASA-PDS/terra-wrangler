@@ -50,6 +50,15 @@ from pathlib import Path
 DOC_REF = "See TERRAFORM_GUIDELINES.md for full rationale and examples."
 REQUIRED_TAG_KEYS = {"tenant", "venue", "component", "managedby", "cicd"}
 
+# Accepted tag values per the PDS AWS Resource Tagging Strategy.
+# This is the single source of truth for value validation — update here when the strategy changes.
+# Values not listed (component, managedby) are free-form and cannot be statically validated.
+TAG_VALUE_CONSTRAINTS: dict[str, list[str]] = {
+    "tenant": ["en", "img", "atm", "sbn"],
+    "venue": ["pds-cds-dev", "pds-cds-test", "pds-cds-prod"],
+    "cicd": ["con", "cli", "iac", "manual", "cd"],
+}
+
 NOT_STATICALLY_CHECKABLE = [
     ("M1", "terraform/ ownership boundary respected (shared infra only in pdc-cds-infra)"),
     ("M4", "modules/ tree stays flat and isn't a thin single-resource wrapper"),
@@ -57,6 +66,8 @@ NOT_STATICALLY_CHECKABLE = [
     ("M14", "resource naming is semantically meaningful (only redundancy/casing is checked)"),
     ("M17", "AWS auth uses OIDC/assumed role at runtime, not just absence of a literal key"),
     ("M18", "least-privilege IAM on the Terraform execution role"),
+    ("M19", "iam/ root module is actually applied via separate, higher-privileged credentials "
+            "(only structural isolation is checked)"),
     ("S9", "cloudfront/pds-main promoted into pds-tf-modules"),
     ("S10", "CloudTrail logging/alerting enabled on the state bucket"),
     ("S11", "Sentinel/Checkov policy-as-code enforcing this document"),
@@ -164,6 +175,17 @@ def check_module(module_dir: Path, root: Path, ignores) -> Report:
     else:
         add("M5", "backend.tf configures an S3 backend", "error", has_backend)
 
+    # M19 — IAM resources isolated in their own standalone root module (error)
+    if not reusable:
+        is_iam_module = module_dir.name == "iam"
+        iam_resources = sorted(set(re.findall(r'resource\s+"(aws_iam_\w+)"', all_text)))
+        if is_iam_module:
+            add("M19", "standalone iam/ root module has its own backend (separate state)", "error", has_backend)
+        else:
+            add("M19", "no aws_iam_* resources outside the standalone iam/ root module", "error",
+                len(iam_resources) == 0,
+                detail=f"found: {iam_resources}" if iam_resources else "")
+
     # M6 — state bucket naming pattern (error, best effort)
     if not reusable:
         hcl_configs = list(module_dir.glob("backend-*.hcl")) + list(module_dir.glob("*.hcl"))
@@ -228,16 +250,31 @@ def check_module(module_dir: Path, root: Path, ignores) -> Report:
         add("M14", "resource local names don't repeat the resource type", "error", len(bad_names) == 0,
             detail=f"e.g. {bad_names[:5]}" if bad_names else "")
 
-    # M15 — default_tags block with standard keys (error)
+    # M15 — default_tags block with standard keys and accepted values (error)
     if provider_files:
         ptext = "\n".join(read(f) for f in provider_files)
         dt_match = re.search(r'default_tags\s*\{.*?tags\s*=\s*\{(.*?)\}', ptext, re.S)
         add("M15", "default_tags block present", "error", bool(dt_match))
         if dt_match:
-            keys_found = set(re.findall(r'(\w+)\s*=', dt_match.group(1)))
+            tag_block = dt_match.group(1)
+            keys_found = set(re.findall(r'(\w+)\s*=', tag_block))
             missing = REQUIRED_TAG_KEYS - keys_found
             add("M15", "default_tags has the standard key set (tenant/venue/component/managedby/cicd)",
                 "error", len(missing) == 0, detail=f"missing keys: {sorted(missing)}" if missing else "")
+            # Lowercase check — only on literal (non-interpolated) string values
+            literal_pairs = re.findall(r'(\w+)\s*=\s*"([^"${}]+)"', tag_block)
+            if literal_pairs:
+                mixed_case = [(k, v) for k, v in literal_pairs if v != v.lower()]
+                add("M15", "all literal tag values are lowercase", "error", len(mixed_case) == 0,
+                    detail=f"mixed case: {mixed_case}" if mixed_case else "")
+            # Accepted-value checks — only for constrained keys, only for literal values
+            # Variable references (var.x) and interpolations ("prefix-${var.x}") are skipped
+            for tag_key, accepted in TAG_VALUE_CONSTRAINTS.items():
+                lit = re.search(rf'\b{tag_key}\s*=\s*"([^"${{}}]+)"', tag_block)
+                if lit:
+                    val = lit.group(1)
+                    add("M15", f'tag "{tag_key}" literal value is in the accepted set', "error", val in accepted,
+                        detail=f'"{val}" not in accepted set {accepted}' if val not in accepted else "")
 
     # M16 — module source pinning (error)
     module_sources = re.findall(r'source\s*=\s*"([^"]+)"', all_text)

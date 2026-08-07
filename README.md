@@ -1,4 +1,4 @@
-# tf-sheriff
+# terra-wrangler
 
 The org-wide source of truth for how PDS/PDC repositories write Terraform, plus a validator that enforces the checkable parts of it. Keeps the peace in `terraform/` — flags what's out of line, doesn't pretend to catch everything (see [What this does NOT do](#what-this-does-not-do)).
 
@@ -16,25 +16,25 @@ The org-wide source of truth for how PDS/PDC repositories write Terraform, plus 
 Install with:
 
 ```bash
-pip install tf-sheriff
+pip install terra-wrangler
 ```
 
 Run it against a `terraform/` directory:
 
 ```bash
-tf-sheriff path/to/terraform/
+terra-wrangler path/to/terraform/
 ```
 
 Machine-readable output for tooling:
 
 ```bash
-tf-sheriff path/to/terraform/ --json
+terra-wrangler path/to/terraform/ --json
 ```
 
 GitHub Actions PR annotations:
 
 ```bash
-tf-sheriff path/to/terraform/ --github
+terra-wrangler path/to/terraform/ --github
 ```
 
 Exit codes: `0` clean, `1` Must-Have failure (or any warning with `--strict`), `2` usage/path error.
@@ -42,7 +42,7 @@ Exit codes: `0` clean, `1` Must-Have failure (or any warning with `--strict`), `
 
 ## Two ways to use the validator
 
-**As a package** (this repo installed via pip): use the `tf-sheriff` console script above.
+**As a package** (this repo installed via pip): use the `terra-wrangler` console script above.
 
 **Vendored, no install required**: copy `scripts/validate_terraform.py` into a consuming repo and call it directly — it has zero third-party dependencies by design, so it doesn't force a `pip install` into someone else's CI:
 
@@ -59,7 +59,7 @@ Add it as a CI step, e.g. in `terraform_cicd.yaml`:
 
 If a specific check is a known, tracked exception for that repo, add a `.tfvalidate-ignore` file at the repo root or next to `terraform/` — see [`.tfvalidate-ignore.example`](./.tfvalidate-ignore.example).
 
-Both distribution paths run the exact same logic — `src/pds/tf_sheriff/validator.py` (the package copy) and `scripts/validate_terraform.py` (the standalone copy) are kept byte-for-byte identical, enforced by a test (see `CLAUDE.md`).
+Both distribution paths run the exact same logic — `src/pds/terra_wrangler/validator.py` (the package copy) and `scripts/validate_terraform.py` (the standalone copy) are kept byte-for-byte identical, enforced by a test (see `CLAUDE.md`).
 
 
 ## What this does NOT do
@@ -121,7 +121,7 @@ tox                  # full build: tests + lint
 
 ### Logs
 
-Runtime output in `pds.tf_sheriff` uses `print()` deliberately — this is a CLI tool whose entire job is producing stdout for a human or CI to read, not a service that should route through `logging`.
+Runtime output in `pds.terra_wrangler` uses `print()` deliberately — this is a CLI tool whose entire job is producing stdout for a human or CI to read, not a service that should route through `logging`.
 
 
 ## Build

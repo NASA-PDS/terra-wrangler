@@ -1,74 +1,96 @@
 # Terraform Development Guidelines
 
-Status: Draft — supersedes and formalizes the earlier "Terraform Development Guidelines" wiki page.
-Sources: HashiCorp official Terraform docs, AWS Prescriptive Guidance ("Best Practices for Using the Terraform AWS Provider," Aug 2025), and PDS/PDC's own proven conventions (marked `PDS convention`). Full citations at the bottom.
+> **Status:** Draft — supersedes the earlier "Terraform Development Guidelines" wiki page.
+> **Sources:** HashiCorp official Terraform docs, AWS Prescriptive Guidance ("Best Practices for Using the Terraform AWS Provider," Aug 2025), internal PDS/PDC Terraform guidelines document, and PDS/PDC conventions. Full citations at the bottom.
 
-This document is written to be read by both humans and AI coding agents. Two tiers:
+Terraform is mandatory for all AWS infrastructure — it documents deployments as code, makes them reproducible, and enables continuous deployment via OIDC.
 
-- **Must-Have** — required in every repo. Enforce via code review and the validator script (`scripts/validate_terraform.py`, see [Enforcement](#enforcement)).
-- **Should-Have** — recommended; the standing improvement backlog, not a merge blocker.
+Two compliance tiers apply to all PDS/PDC repos:
 
-## Architecture context
+- **Must-Have** — required on every PR. Enforced via code review and `scripts/validate_terraform.py` (see [Enforcement](#enforcement)).
+- **Should-Have** — recommended; improvement backlog, not a merge blocker.
 
-- **pdc-cds-infra** owns shared/singleton CDS resources (Cognito, CloudFront, org-wide IAM roles, shared security groups). No other repo creates a competing copy of these.
-- **Application repos** (registry, web-analytics, pdc-observability, future components) each own a `terraform/` directory for their own resources only, and consume shared infra by reading SSM parameters `pdc-cds-infra` publishes — never by reading its state directly.
-- **IAM**: system-wide roles are defined centrally (without policies attached); application-specific policies are defined and attached in the owning app's repo.
-- **Multi-tenant future**: treat `venue` (dev/test/prod) and, eventually, `tenant` as variables on one module — never copy-paste a repo per environment (see the `validate`/`validate-test`/`validate-devin` anti-pattern in the companion State of Terraform report).
+---
+
+## Architecture overview
+
+| Layer | Repo | Visibility | Owns |
+|---|---|---|---|
+| Shared infra | `pdc-cds-infra` | Public | Cognito, CloudFront, shared security groups |
+| Shared IAM | `pds-mcp-infra` | Private | Org-wide IAM roles and infra policies |
+| Application | Each app repo (e.g. `registry`, `nucleus`) | Public | App-specific resources and IAM policies |
+| Deployment config | `<repo>-deploy` | Private (JPL Enterprise GitHub) | Per-venue `.tfvars`, secrets, GitHub Actions wiring |
+
+**How repos talk to each other:** `pdc-cds-infra` and app repos publish outputs to SSM under `/pds/<component>/...`. Consuming repos read from SSM. No repo reads another repo's Terraform state directly.
+
+**Multi-environment:** `venue` (dev/test/prod) and `tenant` are variables on one module — never copy-paste a repo per environment. Deployment parameters that must stay private (ARNs, account IDs, secrets) belong in the corresponding `<repo>-deploy` private repo, not in the public repo's `.tf` files.
+
+**Modules (`pds-tf-modules`):** All shared, reusable AWS resource modules live in `NASA-PDS/pds-tf-modules`. This is the org's approved cybersecurity baseline for resources such as S3 buckets and EC2 instances — do not create these resource types directly with raw `aws_*` resources (see M20, M21).
+
+---
 
 ## Must-Have checklist
 
-| ID | Requirement |
-|----|-------------|
-| M1 | `terraform/` directory at repo root; shared/singleton infra only in `pdc-cds-infra` |
-| M2 | `main.tf`, `variables.tf`, `outputs.tf`, `versions.tf`, `README.md` all present |
-| M3 | Provider config isolated in `providers.tf`; reusable modules never configure a provider block |
-| M4 | `modules/` kept flat (1–2 levels); no module that just wraps one resource |
-| M5 | `backend.tf` (S3) on every deployable module — no local-state exceptions |
-| M6 | State bucket = `pds-<venue>-infra`, supplied via `backend-<venue>.hcl` |
-| M7 | State locking actually enabled (`use_lockfile = true` or a wired DynamoDB table) |
-| M8 | State files, real `.tfvars`, `.terraform/` excluded via `.gitignore` |
-| M9 | `required_version` + `required_providers` set, with an appropriate `~>` pin |
-| M10 | `.terraform.lock.hcl` committed for every root module |
-| M11 | Every variable/output has a `type`/description; no un-defaulted env-specific values get silent defaults |
-| M12 | No hardcoded secrets, ARNs, or account IDs in committed `.tf` files |
-| M13 | Cross-component interfaces published via `/pds/<component>/...` SSM convention |
-| M14 | `snake_case`, singular, non-redundant resource naming |
-| M15 | `default_tags` block present with the mandatory keys `tenant`, `venue`, `component`, `managedby`, `cicd` — all keys and values lowercase, using the PDS AWS Resource Tagging Strategy's accepted values, not placeholder literals |
-| M16 | Cross-repo module sources pinned to a tag/commit ref — never a default branch |
-| M17 | AWS auth via assumed IAM role / OIDC only — no static long-lived keys |
-| M18 | Terraform's execution role follows least privilege |
+| ID | Requirement | Why |
+|----|-------------|-----|
+| M1 | `terraform/` at repo root; shared/singleton infra only in `pdc-cds-infra` | Prevents duplicate singleton resources |
+| M2 | `main.tf`, `variables.tf`, `outputs.tf`, `versions.tf`, `README.md` all present | Standard module structure every engineer expects |
+| M3 | Provider config in `providers.tf` only; reusable modules never declare a provider block | Lets callers control provider version and config |
+| M4 | `modules/` kept flat (1–2 levels); no module that just wraps a single resource | Avoid abstraction for its own sake |
+| M5 | `backend.tf` (S3) on every deployable module — no local-state exceptions | Remote state enables team collaboration and CI |
+| M6 | State bucket = `pds-<venue>-infra`, config supplied via `backend-<venue>.hcl` | One consistent naming scheme across all venues |
+| M7 | State locking enabled (`use_lockfile = true` or DynamoDB table wired) | Prevents concurrent apply corruption |
+| M8 | State files, real `.tfvars`, `.terraform/` in `.gitignore` | Keeps secrets and generated files out of git |
+| M9 | `required_version` + `required_providers` with `~>` pin | Reproducible builds; blocks unexpected major bumps |
+| M10 | `.terraform.lock.hcl` committed for every root module | Pins provider checksums for all platforms |
+| M11 | Every variable and output has a `type` and `description`; no silent defaults for env-specific values | Makes modules self-documenting and safe to call |
+| M12 | No hardcoded secrets, ARNs, or account IDs in committed `.tf` files — use variables or SSM | Avoids credential exposure and account coupling |
+| M13 | Cross-component interfaces published via `/pds/<component>/...` SSM convention | Decouples repos without sharing state files |
+| M14 | `snake_case`, singular, non-redundant resource names | Consistent, grep-friendly naming |
+| M15 | `default_tags` block with mandatory keys: `tenant`, `venue`, `component`, `managedby`, `cicd` — all lowercase, real values not placeholders. `managedby` must be the responsible **person's** email; a team email is acceptable only when `cicd` reflects actual GitHub automation | Required by PDS AWS Resource Tagging Strategy; drives cost allocation and compliance reporting |
+| M16 | Cross-repo module sources pinned to a tag or commit ref — never a default branch | Prevents silent breakage when upstream changes |
+| M17 | AWS auth via assumed IAM role / OIDC only — no static long-lived keys | Static keys are a credential-leak risk |
+| M18 | Terraform execution role follows least privilege | Limits blast radius if the role is compromised |
+| M19 | All `aws_iam_*` resources in a standalone `terraform/iam/` root module with its own state — never mixed into component resources | IAM is higher blast-radius; isolating it gates apply to privileged credentials only |
+| M20 | All S3 buckets created via `pds-tf-modules//terraform/modules/s3/bucket` | Enforces the org cybersecurity baseline: AES-256 encryption at rest, all public-access blocks on, SSL-only bucket policy, `BucketOwnerEnforced` ownership controls |
+| M21 | All EC2 instances created via `pds-tf-modules//terraform/modules/ec2` | Enforces the org cybersecurity baseline: encrypted EBS root volume, MCP-approved AMI, MCP SSM/CloudWatch instance profile, no public IP by default |
+| M22 | Cognito user pool users, groups, and group memberships are NOT managed in Terraform | Multiple modules contribute to one shared user pool — Terraform would cause modules to overwrite each other's contributions (see [Cognito user pool management](#cognito-user-pool-management)) |
+
+---
 
 ## Should-Have checklist
 
 | ID | Recommendation |
-|----|-----------------|
-| S1 | Real CI: blocking fmt/validate, `plan` posted on PR, `apply` gated behind approval via OIDC |
+|----|----------------|
+| S1 | Real CI: blocking `fmt`/`validate`, `plan` posted on PR, `apply` gated behind approval via OIDC |
 | S2 | TFLint (AWS ruleset) + Checkov in CI, non-blocking to start |
-| S3 | Client-side pre-commit hooks (fmt, tflint, checkov) |
+| S3 | Client-side pre-commit hooks: `fmt`, `tflint`, `checkov` |
 | S4 | Module README input/output tables generated with `terraform-docs` |
 | S5 | `examples/` directory for any module reused by more than one consumer |
-| S6 | Rebuild `template-repo-java` / `template-repo-python`'s `terraform/` to reflect the Must-Haves |
-| S7 | Retire tutorial-boilerplate stub repos; consolidate the `validate*` duplicates |
+| S6 | Rebuild `template-repo-java` / `template-repo-python` `terraform/` dirs to reflect Must-Haves |
+| S7 | Retire tutorial-boilerplate stub repos; consolidate `validate*` environment duplicates |
 | S8 | Tag `pds-tf-modules` modules with semver; move toward `terraform-aws-<name>` naming |
 | S9 | Promote `pdc-cds-infra`'s `cloudfront/pds-main` into `pds-tf-modules` as a reusable module |
-| S10 | CloudTrail logging + alerting on the Terraform state buckets |
+| S10 | CloudTrail logging + alerting on Terraform state buckets |
 | S11 | Sentinel/Checkov policy-as-code to auto-enforce tagging, naming, locking |
 | S12 | PR template includes a Terraform reviewer checklist mirroring the validator's "not statically checked" list |
-| S13 | Adopt a central tags module + explicit per-resource tagging (the org's recommended "Approach A") for resource types `default_tags` doesn't reliably cover (IAM policy attachments, ASG-launched EC2 instances, launch templates, ENIs/security groups) |
+| S13 | Central tags module with explicit per-resource tagging for resource types `default_tags` doesn't cover reliably (IAM policy attachments, ASG-launched EC2 instances, launch templates, ENIs, security groups) |
+
+---
 
 ## Code examples
 
-### Root module layout
+### Root module layout (M2, M5, M6)
 
 ```
 terraform/
-├── main.tf              # resources; calls to nested modules
-├── variables.tf         # all input variables, typed + described
-├── outputs.tf           # all outputs, described
+├── main.tf              # resources and calls to local modules
+├── variables.tf         # all inputs — typed and described
+├── outputs.tf           # all outputs — described
 ├── versions.tf          # required_version + required_providers
-├── providers.tf         # provider "aws" block only (root modules)
-├── backend.tf           # empty backend "s3" {} block (M5)
-├── backend-dev.hcl       # per-venue backend config (M6)
+├── providers.tf         # provider "aws" block (root modules only)
+├── backend.tf           # empty backend "s3" {} block
+├── backend-dev.hcl      # per-venue backend config (committed — see M6 below)
 ├── backend-test.hcl
 ├── backend-prod.hcl
 ├── README.md
@@ -76,7 +98,7 @@ terraform/
 │   ├── dev.tfvars.example
 │   ├── test.tfvars.example
 │   └── prod.tfvars.example
-└── modules/              # local nested modules, kept flat (M4)
+└── modules/             # local nested modules, kept flat (M4)
     └── <name>/
 ```
 
@@ -85,42 +107,46 @@ terraform/
 ```hcl
 # backend.tf — committed, no environment-specific values
 terraform {
-  backend "s3" {
-    # bucket/key/region/use_lockfile supplied via -backend-config=backend-<venue>.hcl
-  }
+  backend "s3" {}
 }
 ```
 
 ```hcl
-# backend-dev.hcl — per venue
+# backend-dev.hcl — per venue, committed to git
 bucket       = "pds-dev-infra"
 key          = "registry/opensearch_serverless.tfstate"
 region       = "us-west-2"
-use_lockfile = true      # native S3 locking (Terraform >= 1.10)
+use_lockfile = true   # native S3 locking (Terraform >= 1.10)
 encrypt      = true
 ```
 
-```
+```sh
 terraform init -backend-config=backend-dev.hcl
 ```
+
+**Why `backend-<venue>.hcl` is committed, not gitignored:** the backend block can't use variables or expressions — bucket/key/region have to come from somewhere at `init` time, and partial configuration via `-backend-config=<file>` is Terraform's documented mechanism for supplying them (see [Backend Configuration](https://developer.hashicorp.com/terraform/language/backend)). HashiCorp's warning about `-backend-config` leaking values into `.terraform/` and plan files is specifically about *credentials*:
+
+> We recommend using environment variables to supply credentials and other sensitive data. If you use `-backend-config` or hardcode these values directly in your configuration, Terraform will include these values in both the `.terraform` subdirectory and in plan files. This can leak sensitive credentials.
+
+A bucket name, state key, and region are not credentials — nothing in `backend-<venue>.hcl` should ever be an `access_key`, `secret_key`, `profile`, or any other auth material (that's what M17's OIDC/assumed-role requirement is for). As long as that split holds, committing `backend-<venue>.hcl` is correct: it's what makes `terraform init -backend-config=backend-<venue>.hcl` reproducible for the whole team without needing the bucket name communicated out-of-band, and it's exactly the layout M6 requires.
 
 ### Version pinning (M9, M10)
 
 ```hcl
-# versions.tf — root/deploying module: pin tightly
+# versions.tf — root module: pin tightly
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.0"   # allows 6.x, blocks 7.0
+      version = "~> 6.0"
     }
   }
 }
 ```
 
 ```hcl
-# versions.tf — reusable module: stay loose
+# versions.tf — reusable module: stay loose so callers control the pin
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
@@ -147,8 +173,8 @@ variable "venue" {
 
 variable "component_name" {
   type        = string
-  description = "Component name used to build the SSM parameter prefix."
-  # no default — environment/component-specific, caller must supply
+  description = "Component name used to build SSM parameter paths."
+  # no default — callers must supply; never silently inherit a wrong value
 }
 
 output "opensearch_endpoint" {
@@ -157,75 +183,193 @@ output "opensearch_endpoint" {
 }
 ```
 
-### SSM interface (M13)
+### S3 buckets — required module usage (M20)
+
+**All S3 buckets must use the org module.** It enforces the cybersecurity baseline so you don't have to wire it up yourself:
+
+| Control | What the module enforces |
+|---|---|
+| Encryption at rest | AES-256 SSE on every object (default; upgradeable to KMS) |
+| Public access | All four public-access blocks enabled by default |
+| Bucket policy | SSL-only by default — denies all non-HTTPS requests |
+| Ownership | `BucketOwnerEnforced` — ACLs disabled |
+| Access logging | Configurable; if intentionally disabled, document the reason at the call site |
+| Versioning | Configurable (default: disabled) |
+| Multipart cleanup | Incomplete uploads aborted after 7 days by default |
 
 ```hcl
-# publish
-locals {
-  module_relative_path = replace(abspath(path.module), "/^.*\\/terraform\\//", "")
-  ssm_prefix            = "/pds/${var.component_name}/${local.module_relative_path}"
+# Required — use the org module, pinned to a released tag (M16)
+module "data_bucket" {
+  source = "git@github.com:NASA-PDS/pds-tf-modules.git//terraform/modules/s3/bucket?ref=v1.2.0"
+
+  bucket_name = "pds-${var.venue}-${var.component_name}-data"
+
+  # enable_blocks / enable_policy default to true.
+  # Only set false in venues where MCP enforces these controls at a higher level (e.g. MCP).
+
+  required_tags = {
+    tenant    = var.tenant
+    venue     = var.venue
+    component = var.component_name
+    managedby = var.managed_by
+    cicd      = "iac"
+  }
 }
 
-resource "aws_ssm_parameter" "opensearch_endpoint" {
-  name        = "${local.ssm_prefix}/opensearch_endpoint"
+# Wrong — never declare aws_s3_bucket directly; all cybersecurity controls above will be missing
+# resource "aws_s3_bucket" "data" { ... }
+```
+
+### EC2 instances — required module usage (M21)
+
+**All EC2 instances must use the org module.** It enforces the cybersecurity baseline:
+
+| Control | What the module enforces |
+|---|---|
+| Encryption at rest | EBS root volume encrypted (`encrypted = true`) |
+| Approved AMI | Selects the MCP-managed Amazon Linux 2 image automatically |
+| Instance profile | MCP SSM/CloudWatch instance profile by default |
+| Network exposure | `associate_public_ip_address = false` by default |
+| Tagging | Explicitly tags instance, EBS volume, and network interface — covering the `default_tags` gap for EC2 child resources |
+
+```hcl
+# Required — use the org module, pinned to a released tag (M16)
+module "registry_worker" {
+  source = "git@github.com:NASA-PDS/pds-tf-modules.git//terraform/modules/ec2?ref=v1.2.0"
+
+  pds_resource_prefix = "pds-${var.venue}"
+
+  ec2_instance_configs = [
+    {
+      instance_name   = "registry-worker"
+      instance_type   = "t3.medium"
+      subnet_id       = data.aws_ssm_parameter.private_subnet_id.value
+      security_groups = [module.security_groups.sg_id]
+      key_pair_name   = var.key_pair_name
+      az              = "us-west-2a"
+    }
+  ]
+
+  required_tags = {
+    tenant    = var.tenant
+    venue     = var.venue
+    component = var.component_name
+    managedby = var.managed_by
+    cicd      = "iac"
+  }
+}
+
+# Wrong — never declare aws_instance or aws_launch_template directly; cybersecurity controls above will be missing
+# resource "aws_instance" "worker" { ... }
+```
+
+### SSM interface (M12, M13)
+
+Public repos must never contain hardcoded ARNs or account-specific values. Use variables for inputs and SSM for cross-component outputs.
+
+```hcl
+# outputs.tf — publish outputs to SSM so other components can consume them
+locals {
+  module_relative_path = replace(abspath(path.module), "/^.*\\/terraform\\//", "")
+  ssm_prefix           = "/pds/${var.component_name}/${local.module_relative_path}"
+}
+
+resource "aws_ssm_parameter" "lambda_execution_role_arn" {
+  name        = "${local.ssm_prefix}/lambda_execution_role_arn"
   type        = "String"
-  value       = aws_opensearch_domain.this.endpoint
-  description = "OpenSearch endpoint published for downstream consumers."
+  value       = aws_iam_role.lambda_execution.arn
+  description = "ARN of the Lambda execution role."
   tags        = local.tags
 }
 ```
 
 ```hcl
-# consume
-data "aws_ssm_parameter" "observability_opensearch_endpoint" {
-  name = "/pds/observability/opensearch/opensearch_endpoint"
+# In a consuming repo — read from SSM, never from another repo's state
+data "aws_ssm_parameter" "opensearch_endpoint" {
+  name = "/pds/observability/opensearch/endpoint"
 }
-# use: data.aws_ssm_parameter.observability_opensearch_endpoint.value
 ```
 
 ### Naming & tagging (M14, M15)
 
-Mandatory tag values, per the PDS **AWS Resource Tagging Strategy** (all keys and values lowercase):
+Mandatory tags per the PDS **AWS Resource Tagging Strategy** — all keys and values lowercase:
 
-| Tag | Description | Example values |
+| Tag | Accepted values | Notes |
 |---|---|---|
-| `tenant` | Owner discipline node | `en`, `img`, `atm` |
-| `venue` | Deployment environment — **note:** this is the full env identifier, distinct from the short `dev`/`test`/`prod` code used in state bucket names (M6) | `pds-cds-dev`, `pds-cds-prod` (extend with a `-test` value if your venue set includes it) |
-| `component` | Name of the GitHub repository where the Terraform is stored | `registry`, `nucleus`, `dum` |
-| `cicd` | How the resource was deployed | `con` (AWS console), `cli` (AWS CLI), `iac`/`terraform`, `manual`, `cd` (full automation) |
-| `managedby` | Owning team email or GitHub repo URL — never a literal like `"terraform"` | `pds-operator@jpl.nasa.gov`, `https://github.jpl.nasa.gov/PDSEN/registry-deploy` |
-| `version` (optional) | Application version | — |
+| `tenant` | `en`, `img`, `atm`, `sbn` | Owner discipline node |
+| `venue` | `pds-cds-dev`, `pds-cds-test`, `pds-cds-prod` | Full environment identifier |
+| `component` | Any lowercase GitHub repo name | e.g. `registry`, `nucleus`, `dum` |
+| `cicd` | `con`, `cli`, `iac`, `manual`, `cd` | `con` = console, `cli` = AWS CLI, `iac` = Terraform, `cd` = full GitHub automation |
+| `managedby` | Person's email; team email only when `cicd = cd` | e.g. `jane.doe@jpl.nasa.gov`; `pds-operator@jpl.nasa.gov` only when GitHub is deploying |
+| `version` | Any string (optional) | Application version |
 
 ```hcl
-# Good
-resource "aws_s3_bucket" "logs" {
-  bucket = "pds-${var.venue}-web-analytics-logs"   # short venue code, e.g. "dev" — see M6
-}
-# Avoid — repeats resource type in the local name
-# resource "aws_s3_bucket" "logs_bucket" { ... }
-
 provider "aws" {
   region = "us-west-2"
   default_tags {
     tags = {
-      tenant    = "en"
-      venue     = "pds-cds-${var.venue}"   # full tag-value form, e.g. "pds-cds-dev"
-      component = var.component_name         # matches the GitHub repo name
-      managedby = var.managed_by              # team email or repo URL, e.g. "pds-operator@jpl.nasa.gov"
+      tenant    = var.tenant              # e.g. "en"
+      venue     = "pds-cds-${var.venue}" # full form, e.g. "pds-cds-dev"
+      component = var.component_name      # matches the GitHub repo name
+      managedby = var.managed_by          # person's email; team email only when cicd = GitHub automation
       cicd      = "iac"
     }
   }
 }
 ```
 
-**Coverage gap:** `default_tags` does not reliably tag every resource type — known gaps include IAM policy attachments, ASG-launched EC2 instances (depending on config), launch templates, and some child resources (ENIs, security groups). The org's recommended fix is a central tags module with explicit per-resource tagging (Should-Have S13, reference: `pds-tf-modules`); until that's adopted org-wide, explicitly tag any resource in a gap category rather than relying on `default_tags` alone.
+#### Tag value validation
 
-**Enforcement today:** AWS Resource Groups Tag Policies are active in MCP Dev (reporting-only — non-compliant resources are surfaced, not blocked) across a defined set of roughly 28 taggable resource types (S3 buckets, EC2/ECS/RDS resources, IAM roles, Lambda functions, SSM parameters, and others). Don't invent new tag keys for cost-allocation purposes — only a specific JPL-wide set of tags is enabled for AWS Cost Explorer allocation; stick to the mandatory set above unless a new key has been confirmed enabled centrally.
+The accepted value sets below are the **single source of truth**. They appear in two places that must stay in sync:
+
+1. The Terraform `validation` blocks in your module's `variables.tf` (enforced at `terraform plan` time)
+2. `TAG_VALUE_CONSTRAINTS` at the top of `scripts/validate_terraform.py` (enforced by the org validator)
+
+When the tagging strategy changes, update both.
+
+**`tenant`, `venue`, `cicd` — finite value sets, validate in variables.tf:**
+
+```hcl
+variable "tenant" {
+  type        = string
+  description = "Owner discipline node."
+  validation {
+    condition     = contains(["en", "img", "atm", "sbn"], var.tenant)
+    error_message = "tenant must be one of: en, img, atm, sbn."
+  }
+}
+
+variable "venue" {
+  type        = string
+  description = "Deployment venue — used to build the full tag value pds-cds-<venue>."
+  validation {
+    condition     = contains(["dev", "test", "prod"], var.venue)
+    error_message = "venue must be one of: dev, test, prod."
+  }
+}
+
+variable "cicd" {
+  type        = string
+  description = "Deployment method."
+  validation {
+    condition     = contains(["con", "cli", "iac", "manual", "cd"], var.cicd)
+    error_message = "cicd must be one of: con (console), cli, iac (Terraform), manual, cd (full automation)."
+  }
+}
+```
+
+**`component`, `managedby` — free-form, not value-validated:**
+- `component`: any lowercase GitHub repo name; no finite set to enforce
+- `managedby`: person's email or GitHub URL; format varies, no accepted list
+
+> **Tagging gap:** `default_tags` does not tag every resource type. Known gaps: IAM policy attachments, launch templates, ENIs, security groups, and ASG-launched EC2 instances. The EC2 org module (M21) handles this for EC2 by tagging instance, volume, and network interface explicitly. For other gap resources, add explicit `tags` blocks rather than relying on `default_tags` alone (see S13).
+>
+> **Tag enforcement:** AWS Resource Groups Tag Policies are active in MCP Dev (reporting-only) across ~28 resource types including `s3:bucket`, `ec2:instance`, `ec2:volume`, `iam:role`, `lambda:function`, `ecs:cluster`, `ecs:service`, and others. Non-compliant resources are surfaced (not blocked) under **AWS Resource Groups → Tag Policies**. Do not add new tag keys for cost allocation without confirming they are enabled in the JPL-wide Cost Explorer allocation set.
 
 ### Module sourcing (M16)
 
 ```hcl
-# Avoid — tracks whatever is on the default branch today
+# Wrong — tracks whatever is on the default branch today
 module "s3_bucket" {
   source = "git@github.com:NASA-PDS/pds-tf-modules.git//terraform/modules/s3/bucket"
 }
@@ -235,6 +379,94 @@ module "s3_bucket" {
   source = "git@github.com:NASA-PDS/pds-tf-modules.git//terraform/modules/s3/bucket?ref=v1.2.0"
 }
 ```
+
+### IAM roles and policies (M19)
+
+#### The IAM data model
+
+Role–policy associations span multiple components and repos. The key distinction is whether a role is **infra-scoped** (org-wide, for humans) or **application-scoped** (component-specific, for services):
+
+```mermaid
+classDiagram
+    class IAMRole {
+        <<abstract>>
+    }
+
+    class InfraIAMRole {
+        For Cognito user groups
+        For AWS Console / Kion login
+    }
+
+    class ApplicationIAMRole {
+        For ECS task roles
+        For Lambda execution roles
+    }
+
+    class ApplicationIAMPolicy {
+        Resource-specific permissions
+        Scoped to one application
+    }
+
+    class ApplicationResource {
+        S3 bucket
+        OpenSearch Collection
+        DynamoDB table
+    }
+
+    IAMRole <|-- InfraIAMRole : Extends
+    IAMRole <|-- ApplicationIAMRole : Extends
+    ApplicationIAMPolicy --> ApplicationResource : allows actions on
+```
+
+#### How Terraform assembles IAM across repos
+
+```mermaid
+flowchart TD
+    subgraph mcp["pds-mcp-infra (private)"]
+        direction TB
+        infra_roles["/terraform/iam/roles\nInfra IAM Roles\ndefined without policies"]
+        infra_policies["/terraform/iam/policies/{app}\nInfra IAM Policies\ndefined and attached to infra roles"]
+    end
+
+    subgraph app["Application repo — e.g. registry, nucleus"]
+        direction TB
+        app_iam["/terraform/iam\nApplication IAM Policies\nattached to shared infra roles"]
+    end
+
+    subgraph resources["Application resources"]
+        s3["S3 Bucket\n(via pds-tf-modules M20)"]
+        os["OpenSearch Collection"]
+    end
+
+    infra_roles -->|"app repos reference\nshared role by name"| app_iam
+    infra_policies -->|"attached to\ninfra roles"| infra_roles
+    app_iam -->|"grants access to"| resources
+```
+
+**Rules:**
+- `pds-mcp-infra` defines all **infra IAM roles** in `/terraform/iam/roles` — roles are created without policies attached.
+- `pds-mcp-infra` defines and attaches **infra IAM policies** in `/terraform/iam/policies/{application name}/`.
+- Application repos define **app-specific IAM policies** in their own `terraform/iam/` and attach them to the shared roles from `pds-mcp-infra`.
+- No `aws_iam_*` resource is ever declared in a component's `terraform/` root — only in `terraform/iam/`.
+
+#### Directory isolation (M19)
+
+IAM changes are higher blast-radius than component resources. Isolating them in their own state means they can be planned and applied by a smaller, more privileged set of credentials.
+
+```
+terraform/
+├── main.tf              # component resources — applied by the standard CI role
+├── ...
+└── iam/                 # standalone root module — own state, own apply, privileged credentials only
+    ├── main.tf          # aws_iam_role, aws_iam_policy, aws_iam_role_policy_attachment
+    ├── variables.tf
+    ├── outputs.tf
+    ├── versions.tf
+    ├── backend.tf       # separate state key, e.g. <component>/iam.tfstate
+    └── backend-<venue>.hcl
+```
+
+`terraform/iam/` is a full root module and must meet the complete Must-Have bar (M2, M5–M10, M15, etc.) independently of `terraform/`. If a local module under `modules/` provisions IAM resources, it must only ever be called from `terraform/iam/`.
 
 ### CI auth (M17)
 
@@ -246,29 +478,55 @@ permissions:
 steps:
   - uses: aws-actions/configure-aws-credentials@v4
     with:
-      role-to-assume: arn:aws:iam::111122223333:role/terraform-execution
+      role-to-assume: arn:aws:iam::<account-id>:role/terraform-execution
       aws-region: us-west-2
 ```
 
-## Applying this across CDS infra vs. multi-tenant app repos
+---
 
-| Concern | pdc-cds-infra (shared) | Application repos |
+## Cognito user pool management (M22)
+
+**Do not manage Cognito users, user groups, or group memberships in Terraform.**
+
+Multiple repos contribute resources to the same Cognito user pool. If any one of them managed users or groups via Terraform, it would overwrite the contributions of the others on each apply.
+
+Instead, dedicated scripts extract user pool state to JSON and restore it to Cognito as needed. The production JSON backups live at:
+
+```
+s3://pds-prod-infra/dum_cognito/userpool_backups/
+```
+
+Refer to the "steps to upgrade the user pool" runbook for the full procedure. The current production pool is `nucleus-dum-cognito-user-pool`.
+
+---
+
+## Repo layout: shared infra vs. application repos
+
+| Concern | pdc-cds-infra / pds-mcp-infra (shared) | Application repos |
 |---|---|---|
-| State key | `pds-<venue>-infra`, key prefixed by CDS component (`cognito/`, `cloudfront/`, `iam/`...) | `pds-<venue>-infra`, key prefixed by app/component name |
-| Owns | Singleton cross-cutting resources | App-specific resources only |
-| IAM | System-wide roles, no policies attached | App-specific policies attached to shared roles |
-| Interface | Publishes to SSM under `/pds/<component>/...` | Reads from SSM; never reads pdc-cds-infra state directly |
-| Venue/tenant | dev/test/prod today; add tenant as a variable, not a fork | Same — venue/tenant are variables, never copy-pasted repos |
-| Change control | Highest blast radius — strictest review, first repo for blocking CI | Lower blast radius, but same Must-Have bar |
+| State bucket key | `pds-<venue>-infra`, prefixed by CDS component (`cognito/`, `cloudfront/`, `iam/`...) | `pds-<venue>-infra`, prefixed by app/component name |
+| Owns | Singleton cross-cutting resources; org-wide IAM roles | App-specific resources and IAM policies |
+| IAM | Infra roles (no policies), infra policies attached; isolated in `terraform/iam/` (M19) | App-specific policies attached to shared roles; isolated in `terraform/iam/` (M19) |
+| Interface | Publishes to SSM under `/pds/<component>/...` | Reads from SSM — never reads another repo's state |
+| Venue/tenant | Variables, not forked repos | Same |
+| Deployment params | `pds-mcp-infra` (private) | `<repo>-deploy` private repo on JPL Enterprise GitHub |
+| Change control | Highest blast radius — strictest review, blocking CI | Lower blast radius, same Must-Have bar |
+
+---
 
 ## Enforcement
 
-Guidance alone doesn't hold — pair this document with:
+The validator alone is not enough. Use all four layers:
 
-1. **`scripts/validate_terraform.py`** (this repo) — a static check runnable in CI/pre-commit/locally that mechanically verifies the checkable subset of the Must-Haves (M2, M3, M5–M12 partial, M14 partial, M15, M16) and Should-Haves (S1, S2, S3, S5) against a `terraform/` directory. Errors (Must-Have) fail the run; warnings (Should-Have) don't, unless `--strict`.
-2. **TFLint + Checkov** (S2) for AWS-specific resource-level checks the validator doesn't attempt (security group rules, encryption settings, IAM policy shape).
-3. **The `terraform-conventions` Claude Code skill** (packaged in `NASA-PDS/pds-agent-skills`) so any AI agent authoring or reviewing Terraform in these repos is primed with this document and runs the validator before calling work done.
-4. **The org PR template's Terraform reviewer checklist** (S12) — the validator explicitly reports which Must-Haves it *cannot* check (ownership boundaries, semantic naming, runtime auth behavior, least-privilege IAM, promotion/backlog items). Those become an explicit human sign-off step on every PR that touches `terraform/`, rather than silently falling through the cracks between "the script didn't flag it" and "someone actually looked."
+1. **`scripts/validate_terraform.py`** — static check for the mechanically verifiable Must-Haves (M2, M3, M5–M12 partial, M14 partial, M15, M16, M19, M20, M21) and some Should-Haves (S1–S3, S5). Must-Have failures exit non-zero; Should-Have warnings don't (unless `--strict`). Run it in CI, pre-commit, and locally.
+
+2. **TFLint + Checkov** (S2) — AWS-specific resource-level checks the validator doesn't attempt: security group rules, additional encryption settings, IAM policy shape.
+
+3. **The `terraform-conventions` Claude Code skill** (in `NASA-PDS/pds-agent-skills`) — primes any AI agent authoring or reviewing Terraform in these repos with this document, and requires running the validator before marking work complete.
+
+4. **PR reviewer checklist** (S12) — the validator reports which Must-Haves it cannot check statically (ownership boundaries, semantic naming, runtime auth behavior, least-privilege IAM, credential separation). These become explicit human sign-off items on every PR that touches `terraform/`.
+
+---
 
 ## References
 
@@ -277,14 +535,11 @@ Guidance alone doesn't hold — pair this document with:
 - [Style Guide](https://developer.hashicorp.com/terraform/language/style)
 - [Module creation — recommended pattern](https://developer.hashicorp.com/terraform/tutorials/modules/pattern-module-creation)
 
-**AWS Prescriptive Guidance — "Best Practices for Using the Terraform AWS Provider" (Aug 2025)**
-- [Introduction](https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/introduction.html)
-- [Security](https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/security.html)
-- [Backend](https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/backend.html)
-- [Code base structure](https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/structure.html)
-- [Version management](https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/version.html)
+**AWS**
+- [Prescriptive Guidance: Best Practices for Using the Terraform AWS Provider (Aug 2025)](https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/introduction.html)
+- [IAM: Confused deputy problem](https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html)
+- [IAM: Getting started reducing permissions](https://docs.aws.amazon.com/IAM/latest/UserGuide/getting-started-reduce-permissions.html)
 
 **PDS/PDC**
-- Existing draft "Terraform Development Guidelines" wiki page
-- **AWS Resource Tagging Strategy** (internal, PDSEN wiki space) — source of record for the mandatory tag keys/values in M15 and the tagging code examples above
-- Companion "State of Terraform" report (empirical basis for every `PDS convention` citation)
+- **AWS Resource Tagging Strategy** (internal, PDSEN wiki) — source of record for M15 tag keys/values
+- Companion "State of Terraform" report — empirical basis for PDS convention citations
