@@ -7,11 +7,20 @@
 # Keep this file reviewed like any other config: an ignore that's no longer
 # justified should be deleted, not left to rot.
 #
+# Check ID scheme:
+#   T-series  Terraform/HashiCorp code conventions
+#   A-series  AWS/infrastructure best practices
+#   P-series  PDS/PDC-specific requirements
+#   S-series  Should-Have recommendations
+#
 # Examples:
 #
-# M6                          ignore the state-bucket-naming check everywhere
+# P6                          ignore the state-bucket-naming check everywhere
 #                              (e.g. repo predates the pds-<venue>-infra convention
 #                              and a rename is tracked separately in JIRA-1234)
 #
-# M15  opensearch_managed      ignore the default_tags check only for modules
+# P15  opensearch_managed      ignore the default_tags check only for modules
 #                              whose path contains "opensearch_managed"
+#
+# P20  legacy_bucket           ignore the org-module check for a single legacy module
+#                              while migration to pds-tf-modules is in progress

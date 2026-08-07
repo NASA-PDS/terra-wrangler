@@ -9,6 +9,12 @@ substitute for `terraform validate`, TFLint, or Checkov: it checks
 not HCL correctness or AWS-resource-level security posture. Run it alongside
 those tools, not instead of them.
 
+Check ID scheme — three series, all within the Must-Have tier:
+    T-series  Terraform/HashiCorp code conventions (file structure, pinning, etc.)
+    A-series  AWS/infrastructure best practices (remote state, OIDC auth, etc.)
+    P-series  PDS/PDC-specific requirements (naming, tagging, org modules, etc.)
+Should-Have recommendations use the S-series regardless of origin.
+
 Usage:
     python3 validate_terraform.py [path/to/terraform]
     python3 validate_terraform.py [path] --json      # machine-readable
@@ -24,8 +30,8 @@ Exit codes:
 Ignoring a known exception:
     Add a `.tfvalidate-ignore` file next to the terraform/ directory (or at repo
     root) with one check ID per line, optionally scoped to a path:
-        M6                          # ignore this check everywhere
-        M15  opensearch_managed     # ignore only for a module path containing this substring
+        P6                          # ignore this check everywhere
+        P15  opensearch_managed     # ignore only for a module path containing this substring
     Ignored checks are still reported, but as SKIPPED, and skip counts are
     called out separately from the pass/fail summary so ignores don't silently
     erode coverage over time.
@@ -36,7 +42,7 @@ Design notes:
       parser, to avoid a hard dependency. False positives/negatives are possible
       on unusual formatting — read the flagged file before treating a FAIL as
       certain.
-    - Items that require human or CI-tool judgment (e.g. M18 least-privilege
+    - Items that require human or CI-tool judgment (e.g. A18 least-privilege
       IAM, S10 CloudTrail alerting) are NOT silently skipped — they are listed
       in the report as NOT CHECKED so the report never implies more coverage
       than it actually has.
@@ -60,14 +66,18 @@ TAG_VALUE_CONSTRAINTS: dict[str, list[str]] = {
 }
 
 NOT_STATICALLY_CHECKABLE = [
-    ("M1", "terraform/ ownership boundary respected (shared infra only in pdc-cds-infra)"),
-    ("M4", "modules/ tree stays flat and isn't a thin single-resource wrapper"),
-    ("M13", "SSM outputs are actually consumed correctly by downstream components"),
-    ("M14", "resource naming is semantically meaningful (only redundancy/casing is checked)"),
-    ("M17", "AWS auth uses OIDC/assumed role at runtime, not just absence of a literal key"),
-    ("M18", "least-privilege IAM on the Terraform execution role"),
-    ("M19", "iam/ root module is actually applied via separate, higher-privileged credentials "
+    # T-series
+    ("T1", "terraform/ ownership boundary respected (shared infra only in pdc-cds-infra)"),
+    ("T4", "modules/ tree stays flat and isn't a thin single-resource wrapper"),
+    ("T14", "resource naming is semantically meaningful (only redundancy/casing is checked)"),
+    # A-series
+    ("A17", "AWS auth uses OIDC/assumed role at runtime, not just absence of a literal key"),
+    ("A18", "least-privilege IAM on the Terraform execution role"),
+    # P-series
+    ("P13", "SSM outputs are actually consumed correctly by downstream components"),
+    ("P19", "iam/ root module is actually applied via separate, higher-privileged credentials "
             "(only structural isolation is checked)"),
+    # S-series
     ("S9", "cloudfront/pds-main promoted into pds-tf-modules"),
     ("S10", "CloudTrail logging/alerting enabled on the state bucket"),
     ("S11", "Sentinel/Checkov policy-as-code enforcing this document"),
@@ -155,51 +165,70 @@ def check_module(module_dir: Path, root: Path, ignores) -> Report:
     hcl_files = list(module_dir.glob("*.tf"))
     all_text = "\n".join(read(f) for f in hcl_files)
 
-    # M2 — standard file set (error)
-    for fname in ("variables.tf", "outputs.tf", "versions.tf"):
-        add("M2", f"{fname} present", "error", fname in files)
-    add("M2", "README.md present", "error", (module_dir / "README.md").exists())
+    # ── T-series: Terraform/HashiCorp code conventions ──────────────────────
 
-    # M3 — provider config isolation (error)
+    # T2 — standard file set (error)
+    for fname in ("variables.tf", "outputs.tf", "versions.tf"):
+        add("T2", f"{fname} present", "error", fname in files)
+    add("T2", "README.md present", "error", (module_dir / "README.md").exists())
+
+    # T3 — provider config isolation (error)
     provider_files = [f for f in hcl_files if re.search(r'^\s*provider\s+"aws"', read(f), re.M)]
     if reusable:
-        add("M3", "reusable module does not configure a provider block", "error", len(provider_files) == 0,
+        add("T3", "reusable module does not configure a provider block", "error", len(provider_files) == 0,
             detail=f"provider block found in: {[f.name for f in provider_files]}" if provider_files else "")
     else:
-        add("M3", "provider block present in a root module", "error", len(provider_files) > 0)
+        add("T3", "provider block present in a root module", "error", len(provider_files) > 0)
 
-    # M5 — backend.tf present (error)
+    # T9 — version pinning (error)
+    versions_text = read(files.get("versions.tf", Path("/dev/null")))
+    add("T9", "required_version set", "error", bool(re.search(r'required_version\s*=', versions_text)))
+    add("T9", "required_providers block present", "error", bool(re.search(r'required_providers\s*\{', versions_text)))
+    add("T9", "AWS provider version constraint set", "error", bool(re.search(r'version\s*=\s*"[~><=!\d]', versions_text)))
+
+    # T10 — lock file committed (error)
+    if not reusable:
+        add("T10", ".terraform.lock.hcl committed", "error", (module_dir / ".terraform.lock.hcl").exists())
+
+    # T11 — variables typed + described (error)
+    vtext = read(files.get("variables.tf", Path("/dev/null")))
+    var_blocks = re.findall(r'variable\s+"([^"]+)"\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}', vtext, re.S)
+    if var_blocks:
+        untyped = [n for n, b in var_blocks if not re.search(r'\btype\s*=', b)]
+        undescribed = [n for n, b in var_blocks if not re.search(r'\bdescription\s*=', b)]
+        add("T11", "all variables have a type", "error", len(untyped) == 0,
+            detail=f"missing type: {untyped}" if untyped else "")
+        add("T11", "all variables have a description", "error", len(undescribed) == 0,
+            detail=f"missing description: {undescribed}" if undescribed else "")
+
+    # T14 — naming redundancy (error, partial check only)
+    redundant = re.findall(r'resource\s+"(aws_\w+)"\s+"(\w+)"', all_text)
+    bad_names = [(rtype, rname) for rtype, rname in redundant
+                 if rtype.split("aws_", 1)[-1].rstrip("s") in rname.lower()]
+    if redundant:
+        add("T14", "resource local names don't repeat the resource type", "error", len(bad_names) == 0,
+            detail=f"e.g. {bad_names[:5]}" if bad_names else "")
+
+    # T16 — module source pinning (error)
+    module_sources = re.findall(r'source\s*=\s*"([^"]+)"', all_text)
+    remote_unpinned = [
+        s for s in module_sources
+        if ("git@" in s or "github.com" in s or "git::" in s) and "ref=" not in s
+    ]
+    if module_sources:
+        add("T16", "remote module sources are pinned with ?ref=", "error", len(remote_unpinned) == 0,
+            detail=f"unpinned: {remote_unpinned}" if remote_unpinned else "")
+
+    # ── A-series: AWS/infrastructure best practices ──────────────────────────
+
+    # A5 — backend.tf present (error)
     has_backend = "backend.tf" in files or re.search(r'backend\s+"s3"', all_text)
     if reusable:
-        add("M5", "reusable module correctly has no backend block", "error", not has_backend)
+        add("A5", "reusable module correctly has no backend block", "error", not has_backend)
     else:
-        add("M5", "backend.tf configures an S3 backend", "error", has_backend)
+        add("A5", "backend.tf configures an S3 backend", "error", has_backend)
 
-    # M19 — IAM resources isolated in their own standalone root module (error)
-    if not reusable:
-        is_iam_module = module_dir.name == "iam"
-        iam_resources = sorted(set(re.findall(r'resource\s+"(aws_iam_\w+)"', all_text)))
-        if is_iam_module:
-            add("M19", "standalone iam/ root module has its own backend (separate state)", "error", has_backend)
-        else:
-            add("M19", "no aws_iam_* resources outside the standalone iam/ root module", "error",
-                len(iam_resources) == 0,
-                detail=f"found: {iam_resources}" if iam_resources else "")
-
-    # M6 — state bucket naming pattern (error, best effort)
-    if not reusable:
-        hcl_configs = list(module_dir.glob("backend-*.hcl")) + list(module_dir.glob("*.hcl"))
-        checked_any, ok = False, True
-        for hf in hcl_configs:
-            m = re.search(r'bucket\s*=\s*"([^"]+)"', read(hf))
-            if m:
-                checked_any = True
-                if not re.match(r"^pds-(dev|test|prod)-infra$", m.group(1)):
-                    ok = False
-        if checked_any:
-            add("M6", "state bucket follows pds-<venue>-infra", "error", ok)
-
-    # M7 — state locking actually wired (error)
+    # A7 — state locking actually wired (error)
     if not reusable and has_backend:
         combined = (
             read(files.get("backend.tf", Path("/dev/null")))
@@ -210,62 +239,48 @@ def check_module(module_dir: Path, root: Path, ignores) -> Report:
             re.search(r'use_lockfile\s*=\s*true', combined)
             or re.search(r'dynamodb_table\s*=\s*"[^"]+"', combined)
         )
-        add("M7", "state locking wired (use_lockfile or dynamodb_table set to a real value)", "error", wired,
+        add("A7", "state locking wired (use_lockfile or dynamodb_table set to a real value)", "error", wired,
             detail="only found in a comment, or not set at all" if not wired else "")
 
-    # M9 — version pinning (error)
-    versions_text = read(files.get("versions.tf", Path("/dev/null")))
-    add("M9", "required_version set", "error", bool(re.search(r'required_version\s*=', versions_text)))
-    add("M9", "required_providers block present", "error", bool(re.search(r'required_providers\s*\{', versions_text)))
-    add("M9", "AWS provider version constraint set", "error", bool(re.search(r'version\s*=\s*"[~><=!\d]', versions_text)))
-
-    # M10 — lock file committed (error)
-    if not reusable:
-        add("M10", ".terraform.lock.hcl committed", "error", (module_dir / ".terraform.lock.hcl").exists())
-
-    # M11 — variables typed + described (error)
-    vtext = read(files.get("variables.tf", Path("/dev/null")))
-    var_blocks = re.findall(r'variable\s+"([^"]+)"\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}', vtext, re.S)
-    if var_blocks:
-        untyped = [n for n, b in var_blocks if not re.search(r'\btype\s*=', b)]
-        undescribed = [n for n, b in var_blocks if not re.search(r'\bdescription\s*=', b)]
-        add("M11", "all variables have a type", "error", len(untyped) == 0,
-            detail=f"missing type: {untyped}" if untyped else "")
-        add("M11", "all variables have a description", "error", len(undescribed) == 0,
-            detail=f"missing description: {undescribed}" if undescribed else "")
-
-    # M12 — no obvious hardcoded account ID / ARN literal (error)
+    # A12 — no obvious hardcoded account ID / ARN literal (error)
     literal_account = re.findall(r'\b\d{12}\b', all_text)
     literal_arn = re.findall(r'arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:', all_text)
-    add("M12", "no hardcoded 12-digit AWS account ID literal", "error", len(literal_account) == 0,
+    add("A12", "no hardcoded 12-digit AWS account ID literal", "error", len(literal_account) == 0,
         detail=f"found: {literal_account[:5]}" if literal_account else "")
-    add("M12", "no hardcoded ARN with embedded account ID", "error", len(literal_arn) == 0,
+    add("A12", "no hardcoded ARN with embedded account ID", "error", len(literal_arn) == 0,
         detail=f"found: {literal_arn[:5]}" if literal_arn else "")
 
-    # M14 — naming redundancy (error, partial check only)
-    redundant = re.findall(r'resource\s+"(aws_\w+)"\s+"(\w+)"', all_text)
-    bad_names = [(rtype, rname) for rtype, rname in redundant
-                 if rtype.split("aws_", 1)[-1].rstrip("s") in rname.lower()]
-    if redundant:
-        add("M14", "resource local names don't repeat the resource type", "error", len(bad_names) == 0,
-            detail=f"e.g. {bad_names[:5]}" if bad_names else "")
+    # ── P-series: PDS/PDC-specific requirements ──────────────────────────────
 
-    # M15 — default_tags block with standard keys and accepted values (error)
+    # P6 — state bucket naming pattern (error, best effort)
+    if not reusable:
+        hcl_configs = list(module_dir.glob("backend-*.hcl")) + list(module_dir.glob("*.hcl"))
+        checked_any, ok = False, True
+        for hf in hcl_configs:
+            m = re.search(r'bucket\s*=\s*"([^"]+)"', read(hf))
+            if m:
+                checked_any = True
+                if not re.match(r"^pds-(dev|test|prod)-infra$", m.group(1)):
+                    ok = False
+        if checked_any:
+            add("P6", "state bucket follows pds-<venue>-infra", "error", ok)
+
+    # P15 — default_tags block with PDS standard keys and accepted values (error)
     if provider_files:
         ptext = "\n".join(read(f) for f in provider_files)
         dt_match = re.search(r'default_tags\s*\{.*?tags\s*=\s*\{(.*?)\}', ptext, re.S)
-        add("M15", "default_tags block present", "error", bool(dt_match))
+        add("P15", "default_tags block present", "error", bool(dt_match))
         if dt_match:
             tag_block = dt_match.group(1)
             keys_found = set(re.findall(r'(\w+)\s*=', tag_block))
             missing = REQUIRED_TAG_KEYS - keys_found
-            add("M15", "default_tags has the standard key set (tenant/venue/component/managedby/cicd)",
+            add("P15", "default_tags has the standard key set (tenant/venue/component/managedby/cicd)",
                 "error", len(missing) == 0, detail=f"missing keys: {sorted(missing)}" if missing else "")
             # Lowercase check — only on literal (non-interpolated) string values
             literal_pairs = re.findall(r'(\w+)\s*=\s*"([^"${}]+)"', tag_block)
             if literal_pairs:
                 mixed_case = [(k, v) for k, v in literal_pairs if v != v.lower()]
-                add("M15", "all literal tag values are lowercase", "error", len(mixed_case) == 0,
+                add("P15", "all literal tag values are lowercase", "error", len(mixed_case) == 0,
                     detail=f"mixed case: {mixed_case}" if mixed_case else "")
             # Accepted-value checks — only for constrained keys, only for literal values
             # Variable references (var.x) and interpolations ("prefix-${var.x}") are skipped
@@ -273,18 +288,35 @@ def check_module(module_dir: Path, root: Path, ignores) -> Report:
                 lit = re.search(rf'\b{tag_key}\s*=\s*"([^"${{}}]+)"', tag_block)
                 if lit:
                     val = lit.group(1)
-                    add("M15", f'tag "{tag_key}" literal value is in the accepted set', "error", val in accepted,
+                    add("P15", f'tag "{tag_key}" literal value is in the accepted set', "error", val in accepted,
                         detail=f'"{val}" not in accepted set {accepted}' if val not in accepted else "")
 
-    # M16 — module source pinning (error)
-    module_sources = re.findall(r'source\s*=\s*"([^"]+)"', all_text)
-    remote_unpinned = [
-        s for s in module_sources
-        if ("git@" in s or "github.com" in s or "git::" in s) and "ref=" not in s
-    ]
-    if module_sources:
-        add("M16", "remote module sources are pinned with ?ref=", "error", len(remote_unpinned) == 0,
-            detail=f"unpinned: {remote_unpinned}" if remote_unpinned else "")
+    # P19 — IAM resources isolated in their own standalone root module (error)
+    if not reusable:
+        is_iam_module = module_dir.name == "iam"
+        iam_resources = sorted(set(re.findall(r'resource\s+"(aws_iam_\w+)"', all_text)))
+        if is_iam_module:
+            add("P19", "standalone iam/ root module has its own backend (separate state)", "error", has_backend)
+        else:
+            add("P19", "no aws_iam_* resources outside the standalone iam/ root module", "error",
+                len(iam_resources) == 0,
+                detail=f"found: {iam_resources}" if iam_resources else "")
+
+    # P20 — S3 buckets must use pds-tf-modules, not raw aws_s3_bucket (error)
+    if not reusable:
+        direct_s3 = re.findall(r'resource\s+"(aws_s3_bucket\w*)"\s+"(\w+)"', all_text)
+        add("P20", 'no direct aws_s3_bucket resources — use pds-tf-modules//terraform/modules/s3/bucket',
+            "error", len(direct_s3) == 0,
+            detail=f"found: {[f'{t}.{n}' for t, n in direct_s3[:5]]}" if direct_s3 else "")
+
+    # P21 — EC2 instances must use pds-tf-modules, not raw aws_instance/aws_launch_template (error)
+    if not reusable:
+        direct_ec2 = re.findall(r'resource\s+"(aws_instance|aws_launch_template)"\s+"(\w+)"', all_text)
+        add("P21", 'no direct aws_instance/aws_launch_template resources — use pds-tf-modules//terraform/modules/ec2',
+            "error", len(direct_ec2) == 0,
+            detail=f"found: {[f'{t}.{n}' for t, n in direct_ec2[:5]]}" if direct_ec2 else "")
+
+    # ── S-series: Should-Have recommendations ────────────────────────────────
 
     # S5 — examples/ dir for reusable modules (warning)
     if reusable and "modules" in module_dir.relative_to(root).parts:
@@ -301,7 +333,7 @@ def check_repo_level(root: Path, ignores) -> Report:
     def add(check_id, title, severity, passed, detail=""):
         r.add(check_id, title, severity, passed, detail, ignored=is_ignored(ignores, check_id, str(root)))
 
-    # M8 — .gitignore covers state/tfvars/.terraform (error)
+    # T8 — .gitignore covers state/tfvars/.terraform (error)
     gi, cur = None, root
     for _ in range(4):
         candidate = cur / ".gitignore"
@@ -310,13 +342,13 @@ def check_repo_level(root: Path, ignores) -> Report:
             break
         cur = cur.parent
     if not gi:
-        add("M8", ".gitignore covers state/tfvars/.terraform", "error", False,
+        add("T8", ".gitignore covers state/tfvars/.terraform", "error", False,
             "no .gitignore found within 4 parent levels")
     else:
         text = read(gi)
         needed = ["*.tfstate", ".terraform/", "*.tfvars"]
         missing = [p for p in needed if p not in text and p.strip("*/") not in text]
-        add("M8", ".gitignore covers state/tfvars/.terraform", "error", len(missing) == 0,
+        add("T8", ".gitignore covers state/tfvars/.terraform", "error", len(missing) == 0,
             f"missing patterns in {gi}: {missing}" if missing else "")
 
     # S1 — CI actually wired (warning): a workflow exists AND isn't fully commented-out on the apply step

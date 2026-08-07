@@ -26,8 +26,10 @@ COMPLIANT_MAIN_TF = textwrap.dedent(
       }
     }
 
-    resource "aws_s3_bucket" "logs" {
-      bucket = "pds-dev-example-logs"
+    module "data_bucket" {
+      source      = "git@github.com:NASA-PDS/pds-tf-modules.git//terraform/modules/s3/bucket?ref=v1.2.0"
+      bucket_name = "pds-dev-example-data"
+      required_tags = local.tags
     }
     """
 )
@@ -78,7 +80,9 @@ def _write_compliant_module(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     (root / "main.tf").write_text(COMPLIANT_MAIN_TF)
     (root / "variables.tf").write_text(COMPLIANT_VARIABLES_TF)
-    (root / "outputs.tf").write_text('output "bucket" {\n  description = "The bucket."\n  value = aws_s3_bucket.logs.id\n}\n')
+    (root / "outputs.tf").write_text(
+        'output "bucket_name" {\n  description = "The S3 bucket name."\n  value = module.data_bucket.bucket_name\n}\n'
+    )
     (root / "versions.tf").write_text(COMPLIANT_VERSIONS_TF)
     (root / "backend.tf").write_text(COMPLIANT_BACKEND_TF)
     (root / "backend-dev.hcl").write_text(COMPLIANT_BACKEND_DEV_HCL)
@@ -106,7 +110,7 @@ class ValidateTerraformTests(unittest.TestCase):
             self.assertEqual([], errors, f"Unexpected Must-Have failures: {errors}")
 
     def test_missing_backend_is_a_must_have_failure(self):
-        """A deployable module with no backend.tf should fail M5."""
+        """A deployable module with no backend.tf should fail A5."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,10 +122,44 @@ class ValidateTerraformTests(unittest.TestCase):
             report = validator.check_module(tf_root, tf_root, ignores)
 
             failed_ids = {c[0] for c in report.findings("error", "fail")}
-            self.assertIn("M5", failed_ids)
+            self.assertIn("A5", failed_ids)
+
+    def test_direct_s3_bucket_resource_is_a_must_have_failure(self):
+        """A direct aws_s3_bucket resource in a deployable module should fail P20."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tf_root = Path(tmp) / "terraform"
+            _write_compliant_module(tf_root)
+            (tf_root / "main.tf").write_text(
+                COMPLIANT_MAIN_TF + '\nresource "aws_s3_bucket" "bad" {\n  bucket = "bad-bucket"\n}\n'
+            )
+
+            ignores = validator.load_ignores(tf_root)
+            report = validator.check_module(tf_root, tf_root, ignores)
+
+            failed_ids = {c[0] for c in report.findings("error", "fail")}
+            self.assertIn("P20", failed_ids)
+
+    def test_direct_ec2_resource_is_a_must_have_failure(self):
+        """A direct aws_instance resource in a deployable module should fail P21."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tf_root = Path(tmp) / "terraform"
+            _write_compliant_module(tf_root)
+            (tf_root / "main.tf").write_text(
+                COMPLIANT_MAIN_TF + '\nresource "aws_instance" "bad" {\n  instance_type = "t3.micro"\n}\n'
+            )
+
+            ignores = validator.load_ignores(tf_root)
+            report = validator.check_module(tf_root, tf_root, ignores)
+
+            failed_ids = {c[0] for c in report.findings("error", "fail")}
+            self.assertIn("P21", failed_ids)
 
     def test_iam_resource_outside_iam_module_is_a_must_have_failure(self):
-        """An aws_iam_* resource declared in a non-iam root module should fail M19."""
+        """An aws_iam_* resource declared in a non-iam root module should fail P19."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,10 +173,10 @@ class ValidateTerraformTests(unittest.TestCase):
             report = validator.check_module(tf_root, tf_root, ignores)
 
             failed_ids = {c[0] for c in report.findings("error", "fail")}
-            self.assertIn("M19", failed_ids)
+            self.assertIn("P19", failed_ids)
 
     def test_iam_resources_isolated_in_standalone_iam_module_pass(self):
-        """An aws_iam_* resource declared inside a standalone iam/ root module should not fail M19."""
+        """An aws_iam_* resource declared inside a standalone iam/ root module should not fail P19."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,7 +190,7 @@ class ValidateTerraformTests(unittest.TestCase):
             report = validator.check_module(iam_root, tf_root, ignores)
 
             failed_ids = {c[0] for c in report.findings("error", "fail")}
-            self.assertNotIn("M19", failed_ids)
+            self.assertNotIn("P19", failed_ids)
 
     def test_tfvalidate_ignore_downgrades_a_failure_to_skip(self):
         """A check listed in .tfvalidate-ignore should be reported as skipped, not failed."""
@@ -162,13 +200,13 @@ class ValidateTerraformTests(unittest.TestCase):
             tf_root = Path(tmp) / "terraform"
             _write_compliant_module(tf_root)
             (tf_root / "backend.tf").unlink()
-            (tf_root / ".tfvalidate-ignore").write_text("M5\n")
+            (tf_root / ".tfvalidate-ignore").write_text("A5\n")
 
             ignores = validator.load_ignores(tf_root)
             report = validator.check_module(tf_root, tf_root, ignores)
 
             statuses = {c[0]: c[3] for c in report.checks}
-            self.assertEqual("skip", statuses["M5"])
+            self.assertEqual("skip", statuses["A5"])
 
 
 class StandaloneScriptSyncTests(unittest.TestCase):
