@@ -76,6 +76,7 @@ Check IDs use three prefixes reflecting the origin of each requirement:
 | P21 | All EC2 instances created via `pds-tf-modules//terraform/modules/ec2` — never `resource "aws_instance"` or `resource "aws_launch_template"` directly | Enforces org cybersecurity baseline: encrypted EBS root, MCP-approved AMI, MCP SSM/CloudWatch profile, no public IP |
 | P22 | Cognito user pool users, groups, and group memberships are NOT managed in Terraform | Multiple modules contribute to one shared user pool — Terraform would cause modules to overwrite each other's contributions (see [Cognito user pool management](#cognito-user-pool-management)) |
 | P23 | For every `backend-<venue>.hcl`, commit a matching `tfvars/<venue>.tfvars.example` to the public repo showing required variable names with placeholder values | Engineers cloning the repo know exactly which variables to supply; real values with secrets stay in the private `<repo>-deploy` repo or local gitignored `.tfvars` files |
+| P24 | all resources name must be prefixed with `pds-` | this is to have a clear delineation between resources created for the PDS system and other System Administration resources. |
 
 ---
 
