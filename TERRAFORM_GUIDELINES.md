@@ -318,8 +318,14 @@ module "registry_worker" {
 
 Public repos must never contain hardcoded ARNs or account-specific values. Use variables for inputs and SSM for cross-component outputs.
 
+#### Where to put SSM writes: `outputs.tf`
+
+**SSM `resource` blocks belong in `outputs.tf`, alongside the `output` blocks.** This is the canonical convention across PDS Terraform modules.
+
+The reasoning: `aws_ssm_parameter` resources are the *published output contract* of a module — they are what other repos consume at plan time. Placing them in `outputs.tf` keeps the full answer to "what does this module publish?" in one file. Scattering SSM writes into `main.tf` or a separate `ssm-parameters.tf` splits the contract across files and makes it harder to audit the interface at a glance.
+
 ```hcl
-# outputs.tf — publish outputs to SSM so other components can consume them
+# outputs.tf — SSM writes and output blocks together
 locals {
   module_relative_path = replace(abspath(path.module), "/^.*\\/terraform\\//", "")
   ssm_prefix           = "/pds/${var.component_name}/${local.module_relative_path}"
@@ -332,12 +338,55 @@ resource "aws_ssm_parameter" "lambda_execution_role_arn" {
   description = "ARN of the Lambda execution role."
   tags        = local.tags
 }
+
+output "lambda_execution_role_arn" {
+  value       = aws_iam_role.lambda_execution.arn
+  description = "ARN of the Lambda execution role — published to ${local.ssm_prefix}/lambda_execution_role_arn"
+}
 ```
+
+The `output` block mirrors the SSM write: the SSM parameter is the cross-repo interface; the `output` is the same value surfaced via `terraform output` for local inspection.
+
+#### When a dedicated `ssm-parameters.tf` is acceptable
+
+If a module publishes a large number of SSM parameters (more than ~5–6), a dedicated `ssm-parameters.tf` is acceptable to avoid an unwieldy `outputs.tf`. In that case, `outputs.tf` should still expose the SSM *parameter names* (not the values) as outputs so callers can discover the paths:
+
+```hcl
+# ssm-parameters.tf
+resource "aws_ssm_parameter" "firehose_role_arn" {
+  name  = local.firehose_role_arn_ssm_parameter_name
+  type  = "String"
+  value = aws_iam_role.firehose.arn
+  ...
+}
+
+# outputs.tf — expose the SSM path so callers can discover it
+output "firehose_role_arn_ssm_parameter_name" {
+  value       = aws_ssm_parameter.firehose_role_arn.name
+  description = "SSM parameter name containing the Firehose execution IAM role ARN."
+}
+```
+
+#### What NOT to do
+
+Do not scatter SSM writes into `main.tf` alongside unrelated resource definitions. This makes the module's published interface invisible unless you read every file.
+
+```hcl
+# Wrong — SSM write buried in main.tf next to an EC2 instance
+resource "aws_instance" "logstash" { ... }
+
+resource "aws_ssm_parameter" "ec2_role_arn" {  # hard to find — move to outputs.tf
+  name  = "/pds/web-analytics/iam/ec2_role_arn"
+  ...
+}
+```
+
+#### Consuming SSM from another repo
 
 ```hcl
 # In a consuming repo — read from SSM, never from another repo's state
 data "aws_ssm_parameter" "opensearch_endpoint" {
-  name = "/pds/observability/opensearch/endpoint"
+  name = "/pds/observability/opensearch/opensearch_endpoint"
 }
 ```
 
