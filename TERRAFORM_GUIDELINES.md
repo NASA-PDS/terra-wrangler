@@ -77,6 +77,7 @@ Check IDs use three prefixes reflecting the origin of each requirement:
 | P22 | Cognito user pool users, groups, and group memberships are NOT managed in Terraform | Multiple modules contribute to one shared user pool — Terraform would cause modules to overwrite each other's contributions (see [Cognito user pool management](#cognito-user-pool-management)) |
 | P23 | For every `backend-<venue>.hcl`, commit a matching `tfvars/<venue>.tfvars.example` to the public repo showing required variable names with placeholder values | Engineers cloning the repo know exactly which variables to supply; real values with secrets stay in the private `<repo>-deploy` repo or local gitignored `.tfvars` files |
 | P24 | all resources name must be prefixed with `pds-` | this is to have a clear delineation between resources created for the PDS system and other System Administration resources. |
+| P25 | All IAM role names must use the pattern `pds-<application>-<role-purpose>` | Enables the deployment instance to scope `iam:GetRole`, `iam:PassRole`, and related actions to a predictable prefix (e.g. `arn:aws:iam::*:role/pds-nucleus-*`) rather than granting `Resource: "*"` — see [IAM role naming](#iam-role-naming-p25) |
 
 ---
 
@@ -568,6 +569,61 @@ terraform/
 
 `terraform/iam/` is a full root module and must meet the complete Must-Have bar (T2, A5–A7, T9, T10, T11, P15, etc.) independently of `terraform/`. If a local module under `modules/` provisions IAM resources, it must only ever be called from `terraform/iam/`.
 
+#### IAM role naming (P25)
+
+All IAM roles must follow the pattern `pds-<application>-<role-purpose>`, where:
+
+- `<application>` is the lowercase GitHub repo name (e.g. `nucleus`, `registry`, `dum`)
+- `<role-purpose>` describes what the role is for (e.g. `lambda-execution`, `ecs-task`, `firehose-delivery`)
+
+This predictable prefix is what allows the deployment instance to scope IAM read and pass actions tightly:
+
+```json
+{
+  "Sid": "ReadOwnIamRolesAndPolicy",
+  "Effect": "Allow",
+  "Action": [
+    "iam:GetRole",
+    "iam:GetRolePolicy",
+    "iam:ListRolePolicies",
+    "iam:ListAttachedRolePolicies",
+    "iam:ListInstanceProfilesForRole"
+  ],
+  "Resource": "arn:aws:iam::*:role/pds-nucleus-*"
+},
+{
+  "Sid": "PassOwnRoles",
+  "Effect": "Allow",
+  "Action": "iam:PassRole",
+  "Resource": "arn:aws:iam::*:role/pds-nucleus-*"
+}
+```
+
+Without a consistent prefix, the deployment role would need `Resource: "*"` for these actions — a significant over-grant.
+
+```hcl
+# Required — role names follow pds-<application>-<role-purpose>
+resource "aws_iam_role" "lambda_execution" {
+  name = "pds-nucleus-lambda-execution"
+  ...
+}
+
+resource "aws_iam_role" "ecs_task" {
+  name = "pds-nucleus-ecs-task"
+  ...
+}
+
+# Wrong — no application prefix; breaks prefix-scoped IAM policies in the deployment role
+# resource "aws_iam_role" "lambda_execution" {
+#   name = "nucleus-lambda-execution"
+# }
+
+# Wrong — generic name; not scoped to one application, can't be distinguished in a wildcard resource ARN
+# resource "aws_iam_role" "execution_role" {
+#   name = "pds-execution-role"
+# }
+```
+
 ### CI auth (A17)
 
 ```yaml
@@ -621,7 +677,7 @@ The validator alone is not enough. Use all four layers:
 1. **`scripts/validate_terraform.py`** — static checks for the mechanically verifiable Must-Haves:
    - T-series: T2, T3, T8 (repo-level), T9, T10, T11, T14 (partial), T16
    - A-series: A5, A7, A12
-   - P-series: P6, P15, P19, P20, P21, P23
+   - P-series: P6, P15, P19, P20, P21, P23, P24
    - Should-Haves: S1–S3, S5
 
    Must-Have failures exit non-zero; Should-Have warnings don't (unless `--strict`). Run it in CI, pre-commit, and locally.
@@ -631,6 +687,223 @@ The validator alone is not enough. Use all four layers:
 3. **The `terraform-conventions` Claude Code skill** (in `NASA-PDS/pds-agent-skills`) — primes any AI agent authoring or reviewing Terraform in these repos with this document, and requires running the validator before marking work complete.
 
 4. **PR reviewer checklist** (S12) — the validator reports which Must-Haves it cannot check statically (T1, T4, T14 semantics, A17 runtime auth, A18 least-privilege IAM, P13 SSM consumption, P19 credential separation). These become explicit human sign-off items on every PR that touches `terraform/`.
+
+---
+
+## Cross-Repo Patterns
+
+These guidelines apply to multi-module, multi-repo Terraform stacks such as the PDS o11y platform. They complement the single-module Must-Have rules above.
+
+### P26: SSM parameter naming convention
+
+All SSM parameters must follow the path pattern:
+
+```
+/pds/{component}/{service}/{parameter-name}
+```
+
+- `{component}` matches the GitHub repository name (e.g. `o11y-platform`, `o11y-cloudfront-batch`)
+- `{service}` is the AWS service or module area (e.g. `opensearch`, `firehose`, `iam`, `ec2`, `kinesis`, `s3`)
+- `{parameter-name}` uses underscores for multi-word names, consistent with Terraform identifier conventions (e.g. `opensearch_endpoint`, `ec2_role_arn`, `firehose_role_arn`)
+
+```
+/pds/o11y-platform/opensearch/opensearch_endpoint       ✓
+/pds/o11y-cloudfront-batch/iam/ec2_role_arn             ✓
+/pds/myrepo/opensearch/endpoint                         ✗  (missing component prefix in parameter name)
+/pds/my-repo/opensearch/OpenSearchEndpoint              ✗  (mixed case — use underscores)
+```
+
+This convention is enforced by P13. It makes SSM paths predictable and grep-able across repos.
+
+### P27: `cicd` tag default must be `"iac"`
+
+The `cicd` variable default must always be `"iac"`, matching the org-wide `common.hcl` standard in cds-infra-deploy. The value `"terraform"` was a legacy default and is no longer in use.
+
+```hcl
+# Required
+variable "cicd" {
+  description = "CI/CD deployment method tag."
+  type        = string
+  default     = "iac"
+  validation {
+    condition     = contains(["con", "cli", "iac", "manual", "cd"], var.cicd)
+    error_message = "cicd must be one of: con, cli, iac, manual, cd."
+  }
+}
+
+# Wrong — legacy value, no longer valid as a default
+variable "cicd" {
+  default = "terraform"   # ✗
+}
+```
+
+### P28: No personal email addresses as variable defaults
+
+Variables like `managedby` must never carry a personal email address as a default. Use no default (forcing explicit provision) so callers must supply a real value:
+
+```hcl
+# Required — no default, caller must supply
+variable "managedby" {
+  description = "Managing organization or team tag (e.g. team email distribution list)."
+  type        = string
+}
+
+# Wrong — personal email hardcoded in a committed file
+variable "managedby" {
+  default = "engineer@example.com"   # ✗
+}
+```
+
+This also applies to documentation: never put personal emails, usernames, or account IDs in README files or inline comments. Use generic placeholders like `<your-profile>`, `<account-id>`, `<team-email>`.
+
+### P29: `*_enabled` flag pattern for optional cross-module dependencies
+
+When a module has an optional dependency on another module that may not be deployed yet, gate the SSM data source and any dependent resource creation behind a boolean flag that defaults to `false`. This lets the provider module bootstrap before its consumers exist.
+
+```hcl
+variable "consumer_enabled" {
+  description = "When true, reads consumer's role ARN from SSM and adds it to the access policy. Leave false until the consumer module is deployed."
+  type        = bool
+  default     = false
+}
+
+data "aws_ssm_parameter" "consumer_role_arn" {
+  count = var.consumer_enabled ? 1 : 0
+  name  = "/pds/consumer/iam/role_arn"
+}
+
+# Guard the policy resource against an empty principal list
+resource "aws_<service>_policy" "this" {
+  count = length(local.access_principals) > 0 ? 1 : 0
+  ...
+}
+```
+
+Deployment sequence: deploy provider with flag `false` → deploy consumer → flip flag to `true` and re-apply provider (access-policy update only, no resource replacement).
+
+### P30: SSM-decoupled IAM pattern for circular dependency breaking
+
+When an IAM module needs ARNs for resources in a sibling module, and the sibling module needs the IAM role ARNs back, break the cycle by computing ARNs from static name locals in the IAM module rather than reading live resource attributes:
+
+```hcl
+# In iam/ — compute ARNs without referencing live resources
+locals {
+  kinesis_stream_name = "pds-${var.component}-kinesis"
+  kinesis_stream_arn  = "arn:${data.aws_partition.current.partition}:kinesis:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stream/${local.kinesis_stream_name}"
+}
+
+resource "aws_iam_policy" "firehose_kinesis" {
+  policy = jsonencode({
+    Statement = [{
+      Action   = ["kinesis:PutRecord", "kinesis:PutRecords", "kinesis:GetRecords", "kinesis:GetShardIterator", "kinesis:DescribeStream", "kinesis:ListShards"]
+      Resource = local.kinesis_stream_arn   # computed, not a live reference
+    }]
+  })
+}
+```
+
+The IAM module can then be applied first with no knowledge of whether the sibling's resources exist yet. The sibling module reads role ARNs from SSM (published by IAM) rather than from Terraform state outputs. This also means both modules can deploy independently in CI without ordering constraints.
+
+### P31: Terragrunt is the primary deploy path; `task LOCAL=1` is fallback only
+
+All module deployment documentation must lead with the Terragrunt path via `cds-infra-deploy`. The `task ... LOCAL=1` pattern (repo-local gitignored tfvars) is for personal iteration only and must be presented as a secondary fallback.
+
+```markdown
+## Deploy
+
+**Primary (Terragrunt via cds-infra-deploy):**
+\```bash
+terragrunt apply --terragrunt-working-dir $CDS_INFRA_DEPLOY_DIR/venues/<venue>/<component>/<module>
+\```
+
+**Fallback (local iteration):**
+\```bash
+task module:deploy VENUE=dev LOCAL=1
+\```
+```
+
+Never document `task ... LOCAL=1` as the primary or only workflow — it bypasses the shared tfvars tracked in `cds-infra-deploy` and can't be reproduced by teammates.
+
+### P32: Every deploy section must end with a smoke test
+
+Every module's deployment documentation must include a smoke test command immediately after the apply step. The smoke test must verify SSM outputs exist, primary resources are reachable, and service health is acceptable. Do not put the smoke test in a separate document.
+
+```markdown
+### Step N: Deploy <module>
+\```bash
+terragrunt apply --terragrunt-working-dir venues/<venue>/<component>/<module>
+\```
+Smoke test:
+\```bash
+bash scripts/smoke-test.sh <venue>
+\```
+```
+
+Smoke test scripts belong in `scripts/smoke-test.sh` (or `scripts/smoke-test-<qualifier>.sh` for multi-phase stacks) at the repo root.
+
+### P33: Validation blocks on VPC/subnet/security-group inputs
+
+Variables accepting VPC IDs, subnet IDs, and security group IDs must include validation blocks to surface misconfiguration at `terraform plan` time rather than mid-apply:
+
+```hcl
+variable "vpc_id" {
+  type        = string
+  description = "ID of the VPC for the resource's security group."
+  validation {
+    condition     = can(regex("^vpc-[0-9a-f]+$", var.vpc_id))
+    error_message = "vpc_id must be a valid VPC ID beginning with vpc-."
+  }
+}
+
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "Private subnet IDs for VPC-attached resources."
+  validation {
+    condition     = alltrue([for id in var.private_subnet_ids : can(regex("^subnet-[0-9a-f]+$", id))])
+    error_message = "All subnet IDs must begin with subnet-."
+  }
+}
+```
+
+### P34: `lifecycle { ignore_changes = [tags] }` on security groups in MCP
+
+AWS Config in MCP environments auto-applies compliance tags to security groups, causing perpetual drift in `terraform plan`. Add a lifecycle block to suppress this noise:
+
+```hcl
+resource "aws_security_group" "example" {
+  name   = "pds-${var.component}-sg"
+  vpc_id = var.vpc_id
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+```
+
+This applies to any security group resource in an MCP-managed account. Without it, every `plan` will show a tag diff that neither the module nor the caller controls.
+
+### P35: `module_ref` in cds-infra-deploy must be a release tag for prod
+
+In `cds-infra-deploy`, the `module_ref` local for prod venues must pin to a semver release tag (e.g. `"v1.0.1"`), never a branch name. Test venues track `"main"`. Dev venues use the active feature branch during development, then `"main"` once merged.
+
+```hcl
+# venues/prod/<component>/<component>.hcl
+
+# Required — pinned release tag
+module_ref = "v1.0.1"
+
+# Wrong — branch name in prod; breaks reproducibility and pins nothing
+module_ref = "retrofit/o11y-rename"  # ✗
+```
+
+When no release tag exists yet for a component, use `"main"` with a comment:
+
+```hcl
+# TODO: pin to a release tag (e.g. "v1.0.0") before deploying to prod
+module_ref = "main"
+```
+
+Test venues always track `"main"` — they intentionally exercise the current stable state.
 
 ---
 
