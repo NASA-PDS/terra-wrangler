@@ -813,7 +813,7 @@ All module deployment documentation must lead with the Terragrunt path via `cds-
 
 **Primary (Terragrunt via cds-infra-deploy):**
 \```bash
-terragrunt apply --terragrunt-working-dir $CDS_INFRA_DEPLOY_DIR/venues/<venue>/<component>/<module>
+terragrunt apply --working-dir $CDS_INFRA_DEPLOY_DIR/venues/<venue>/<component>/<module>
 \```
 
 **Fallback (local iteration):**
@@ -831,7 +831,7 @@ Every module's deployment documentation must include a smoke test command immedi
 ```markdown
 ### Step N: Deploy <module>
 \```bash
-terragrunt apply --terragrunt-working-dir venues/<venue>/<component>/<module>
+terragrunt apply --working-dir venues/<venue>/<component>/<module>
 \```
 Smoke test:
 \```bash
